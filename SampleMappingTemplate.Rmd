@@ -1,0 +1,988 @@
+---
+title: "XX#####_Sample_Mapping"
+author: "curator_name"
+date: "`r format(Sys.time(), '%Y-%B-%d')`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+editor_options: 
+  chunk_output_type: inline
+---
+
+# General setup
+
+### Updates
+**
+Note to curators:  
+* Describe the updates to the study.  
+* Suggested format: date as YYYY-MM-DD and bullet points of changes in this update.  
+**
+
+### Summary
+
+1. Study XX##### for [Theme Molecule] - Phase XXX ([study path on fileshare]) has data for the following assays: [names of assay folders, e.g. Cobas, Facs, Fluidigm, Histology, Nanostring, Massspec, Immunoassay, NGS etc].  
+[(Sr.) BOM/BOPM/...]: [...]  
+Study title: [...]  
+  
+2. Workflows:  
+
+a. [...] is the central lab for tissue samples. [...] is the central lab for blood samples.  
+b. Histogenex performed histology using tissue samples received from clinical sites.  
+c. EA RNAseq: Histogenex extracted RNA from tissue samples and sent RNA to EA (now Q2SO) for RNAseq.  
+d. EA WES: Histogenex extracted DNA from tissue samples and sent DNA to EA for WES.  
+e. FMI: Histogenex extracted DNA from tissue samples and sent DNA to FDMI.  
+f. Nanostring: Precision extracted RNA from PBMC samples and sent RNA sampless to LabCorp for Nanostring
+
+3. Decisions made in the sample mapping process  
+**  
+Notes to curators:  
+* Note anything "unusual" encountered during the sample mapping process
+**  
+
+### R markdown setup and package loading
+
+```{r setup, include=TRUE}
+
+
+  library(readr)
+  library(readxl)
+  library(dplyr)
+  library(stringr)
+  library(devtools)
+  library(tidyr)
+  library(haven)
+  library(kableExtra)
+  library(knitr)
+
+
+```
+
+
+```{r functions}
+
+# Create a new binary pipe operator
+`%notin%` = Negate(`%in%`)
+
+# str_ignore function - opposite of str_subset - excludes elements of a string vector that have specific pattern
+str_ignore <- function(string, pattern) {
+  string[!str_detect(string, pattern)]
+}
+
+# Date and time:
+bsed_format <- "%Y-%m-%d"
+bsed_pattern <- "[0-9]{4}-[0-1][0-9]-[0-9]{2}"
+bsetm_format <- "%H:%M"
+bsetm_pattern <- "[0-9]{2}:[0-9]{2}"
+
+sample_mapping_table_colnames <- c()
+
+# Functions for stitching together data files. Pass a list of files and it outputs a dataframe containing all the data from the files.
+# csv
+CombineCSVFiles <- function(file_list){
+  df <-  data.frame(stringsAsFactors=FALSE)
+  for(i in file_list){
+    j = as.data.frame(read_csv(i, col_types = cols(.default = col_character())))
+    df <- bind_rows(df, j) # bind_rows can bind data frames with mismatched numbers of columns
+    #df$filename <- i
+  }
+  return (df)
+}
+
+# txt
+CombineTXTFiles <- function(file_list){
+  df <-  data.frame(stringsAsFactors=FALSE)
+  for(i in file_list){
+    j = as.data.frame(read_tsv(i, col_types = cols(.default = col_character())))
+    # bind_rows can bind data frames with mismatched numbers of columns
+    df <- bind_rows(df, j)
+  }
+  return (df)
+}
+
+# xlsx
+CombineXLSXFiles <- function(file_list, sheets, skip = 0){
+  df <-  data.frame(stringsAsFactors=FALSE)
+  if(missing(sheets)){
+    for(i in file_list){
+      for(sheet in excel_sheets(i)){
+        j <- as.data.frame(read_excel(i, sheet = sheet, col_types = "text", skip = skip))
+        # bind_rows can bind data frames with mismatched numbers of columns
+        df <- bind_rows(df, j)
+      }
+    }
+  } else {
+    for(i in file_list){
+      for(sheet in sheets){
+        j <- as.data.frame(read_excel(i, sheet = sheet, col_types = "text", skip = skip))
+        # bind_rows can bind data frames with mismatched numbers of columns
+        df <- bind_rows(df, j)
+        }
+      }
+    }
+  return (df)
+}
+
+# Function to render a horizontally and vertically scrollable table in knitted html
+render_table <- function(df){
+  kbl(df) %>% 
+  kable_styling(bootstrap_options = c("striped", "condensed"), full_width = T,
+                fixed_thead = T, font_size = 7, ) %>%
+  scroll_box(width = "100%", height = "200px")
+}
+
+# Function to compare output tables. Pass 2 tables you need compared and a key to use for comparison (optional) and it will print the values that differ between the 2 tables.
+# Example of usage 1:
+# compare_tables(output_table, old_dsi)
+# Example of usage 2:
+# compare_tables(qlab_hist_tracker_df, ihc_hist_qlab_df, key = c("HIST_ID"))
+# Use this line with this function if you'd like to have all lines printed: 
+# options(tibble.print_max = Inf, tibble.width = Inf)
+
+compare_tables <- function(df1, df2, key = c("SAMPLE_ID")){
+    # Changed metadata
+    df12_join <- df1 %>% inner_join(df2, by = key)
+    
+    for (clmn in names(df12_join)[grepl("\\.x", names(df12_join))]){
+      # check which samples have values differ between two tables
+      print(str_remove(clmn, ".x"))
+      clmn1 <- str_replace(clmn, ".x", ".y")
+      rows_that_differ <- which(df12_join[, clmn] != df12_join[, clmn1])
+      rows_that_differ_no <- length(rows_that_differ)
+      print(rows_that_differ_no)
+      if(rows_that_differ_no != 0){
+        df <- df12_join[rows_that_differ, c(key,clmn,clmn1)]
+        print(df)
+        }
+    }
+}
+
+# Function that selects and adds only those columns that are missing.
+# Added columns are empty, don't have any values.
+# Example of usage:
+# add_columns(output_sample_mapping_table_colnames)
+ 
+add_columns <- function(data, cname){
+  add <- cname[!cname %in% names(data)]
+  
+  if(length(add)!=0) data[add] <- NA
+  data
+}
+
+# Function to select files dated before the cutoff date
+select_files_by_date <- function(files, date){
+  files_info <- file.info(files)
+  # select files before the given date
+  selected_files <- row.names(files_info)[as.Date(files_info$ctime) < date] 
+  files <- files[files %in% selected_files]
+  return(files)
+}
+
+```
+
+### File sources
+
+**
+Notes to curators:  
+* List all the used and checked resources (even those where no files of interest were found).  
+
+Helpful to include to facilitate QC and to keep for reference:  
+* Source of the file, file name and a full path to the file (if available).
+* Date the file was downloaded. Nothing was downloaded? Put the date the source was checked.
+* Was the source useful? Options: Used/Not used/Not available/Not requested
+* Other helpful details: information from the file that was used, the reason why the file was not used. 
+See the reference list below.  
+**
+
+### File paths and variables
+
+```{r file paths}
+
+cutoff_date <- as.Date("YYYY-MM-DD") # Time stamp for the update.Files added to the study folder after the cut off date are ignored in the current update.
+study <- tolower("XX#####")
+
+### input files
+dm_filepath <- file.path('C:\\Projects\\Project_2\\dm')
+tv_filepath <- file.path('C:\\Projects\\Project_2\\tv')
+zb_filepath <- file.path('C:\\Projects\\Project_2\\zb')
+tdq_path <- file.path('C:\\Projects\\Project_2\\tdq')
+cova_inventory_filepath <- file.path('C:\\Projects\\Project_2\\cova')
+hist_rawdata_path
+ihc_qlab_folders
+ngs_rawdata_path
+qlab_hist_tracker_filepath
+ngs_rawdata_path
+
+
+### output files
+
+# output_table_path <- paste0('C:\\Projects\\Project_2', 'result.csv')      
+
+```
+
+# Data wrangling
+
+## SDTMv
+
+### Subjects
+```{r}
+
+# Collect USUBJIDs and extract PATNUMs. Add SCRNUMs in next section from Covance inventory if possible.
+subject_df <- read.csv(dm_filepath)[c("USUBJID")] %>%
+  mutate(PATNUM = str_extract(USUBJID, "[^-][^-]*$")) %>% distinct()
+
+```
+
+### Visits
+```{r}
+
+tv_file <- read_sas(tv_filepath) %>% mutate_if(is.character, str_trim) %>% mutate_if(is.character, toupper)
+
+tv_VISIT <- unique(tv_file$VISIT) %>% toupper() %>% sort()
+tv_VISIT
+
+```
+
+### ZB domain
+```{r}
+
+zb_file <- read_sas(zb_filepath) %>% 
+  mutate_if(is.character, str_trim) %>%
+  mutate_if(is.character, toupper) %>%
+  # Replace empty values with NA
+  mutate_all(~ifelse(. %in% c("N/A", "null", ""), "NA", .))
+
+# Vendors
+zb_file$ZBNAM %>% unique()
+
+# SAMPLE_ID columns 
+(c("ZBREFID","ZBGRPID","ZBSPID")) %in% names(zb_file)
+
+```
+
+### TDQ
+
+```{r}
+
+# Collect information about tissue samples from TDQ file
+tdq_df <- read.csv(tdq_path) %>%
+  select(`STUDYID` = `PROJECT`,
+         `PATNUM` = `SUBJECT`,
+         `SITEID` = `SID`,
+         `SAMPLE_ID` = `RREFID`,
+         `Y` = `SAMP_DC_YYYY`,
+         `M` = `SAMP_DC_MM`,
+         `D` = `SAMP_DC_DD`,
+         `BSETM` = `SAMP_TM`,
+         `BMFLOC` = `LOCBIO_STD`,
+         `PFSPEC` = `SAMPP_STD`) %>%
+  mutate(BSED = paste(Y, M, D, sep = "-")) %>% distinct()
+
+```
+
+## Central lab(s)
+
+#### Covance
+Covance is the central lab.  
+**
+Note to curators:  
+* Covance sample IDs are usually a concatenation of the Covance accession number and 2 digits reflecting the container number. Covance accession number usually has a format [A-Z]{1}[0-9]{6} (e.g. Z151423) or [0-9]{10} (e.g. 6500267332). The container number could be added with (e.g. Z151423-17, 6500267332-14) or without the dash (e.g. Z15142317, 650026733214) to make the full sample ID.  
+**
+```{r}
+
+cova_inventory <- read_xls(path = cova_inventory_filepath, sheet = "Specimen Details", col_types = "text", na = "", skip = 1) %>%
+  # Select and rename columns
+  select(`STUDYID` = `Protocol`,
+         `PATNUM` = `Patient Number`,
+         `SCRNUM` = `Screening Number`,
+         `ACCSNM` = `Accession Number`,
+         `CONTAINER` = `Container Number`,
+         `SAMPLE_ID` = `Container Barcode`,
+         `BSED` = `Spec. Coll. Date`,
+         `VISIT` = `Visit`,
+         `PFSPEC` = `Specimen Type`,
+         `SHIP_TO` = `Ship To`) %>%
+  mutate_all(toupper) %>%
+  mutate(BSED = format(as.Date(BSED, "%d-%b-%Y"),bsed_format),
+         BMFNAM = "COVA",
+         PRACCSNM = NA,
+         DERIVED_FROM = SAMPLE_ID,
+         IS_PRIMARY = "TRUE",
+         BSETM = NA,
+         # Harmonize PFSPEC values. Modify as necessary.
+         PFSPEC = case_when(grepl("Slides", PFSPEC, ignore.case = T) ~ "SLIDE",
+                            grepl("Blood", PFSPEC, ignore.case = T) ~ "BLOOD",
+                            grepl("Serum", PFSPEC, ignore.case = T) ~ "SERUM",
+                            grepl("Plasma", PFSPEC, ignore.case = T) ~ "PLASMA",
+                            TRUE ~ PFSPEC),
+         # Create BMFLOC. Modify as necessary.
+         BMFLOC = case_when(grepl("PBMC|PLASMA|SERUM|BLOOD", PFSPEC) ~
+                              "WHOLE BLOOD",
+                            TRUE ~ "NA")) %>%
+  # Remove potentially duplicated samples
+  distinct(`SAMPLE_ID`, .keep_all = TRUE)
+
+```
+Covance inventory contains the SCRNUMs
+```{r}
+# Add SCRNUMs to subjects_df from Covance inventory
+subject_df <- subject_df %>% 
+  full_join(cova_inventory %>% select("PATNUM","SCRNUM") %>% distinct() %>%
+              drop_na(PATNUM) %>% drop_na(SCRNUM), by="PATNUM")
+
+```
+
+## Assays
+
+**
+Note to curators.
+Formatting convention:
+### Assay name (= folder name in the study folder usually)
+
+#### Vendor name  
+* Brief description of the sample flow for the assay/vendor combination.
+
+##### Rawdata  
+* Brief comment if necessary.  
+[Code chunk for processing raw data files]
+
+##### Sample Metadata  
+* Brief comment if necessary.  
+[Code chunk for processing sample manifests/inventories etc.]  
+The output should a dataframe formatted as a "mini output table". You should have at least all DSI columns and may include extra columns.
+**
+
+### Histology
+
+#### QLAB
+
+##### Rawdata
+
+##### Sample Metadata
+
+```{r}
+
+# List all folders in histology folder.
+# Modify pattern as needed.
+ihc_qlab_folders <- list.files(path= hist_rawdata_path, pattern = "qlab",
+                               full.names= TRUE, ignore.case = FALSE)
+
+# List all manifest files in ihc_image_folders
+# Modify pattern as needed.
+ihc_qlab_files <- list.files(path=ihc_qlab_folders, pattern = ".csv",
+                             full.names = TRUE, ignore.case = FALSE)
+ihc_qlab_files
+
+ihc_qlab_df <-CombineCSVFiles(ihc_qlab_files) %>% 
+  select(`STUDYID` = `Study Identifier`,
+         `BMFNAM` = `Vendor Name`,
+         `SCRNUM` = `Unique Subject Identifier`,
+         `VISIT` = `Visit Code`,
+         `BSED` = `Date of Specimen Collection`,
+         `BSETM` = `Time of Specimen Collection`,
+         `SAMPLE_ID` = `Vendor Unique Sample Identification`,
+         `BMFLOC` = `Anatomical Location of  Specimen`,
+         `PFSPEC` = `Specimen Type`,
+         `SPECCOND` = `Specimen Condition`) %>%
+  mutate(BSED = format(as.Date(BSED, "%Y%m%d"), bsed_format),
+         PFSPEC = case_when(grepl("BLOCK SLIDE", PFSPEC, ignore.case = T) ~
+                              "BLOCK",
+                            TRUE ~ NA_character_))
+
+# Remove duplicate sample IDs
+ihc_qlab_df <- ihc_qlab_df %>% distinct(SAMPLE_ID, .keep_all = TRUE) %>%
+  filter(!is.na(SAMPLE_ID))
+
+# Make sure all samples have a subject identifier
+ihc_qlab_df[is.na(ihc_qlab_df$SCRNUM),]
+
+# Add patient number and USUBJIDs
+ihc_qlab_df <- ihc_qlab_df %>%
+  left_join(subject_df) %>% distinct()
+
+# Example code to solve duplicate ID issue
+sample_occur <- as.data.frame(table(ihc_qlab_df$SAMPLE_ID))
+ihc_qlab_df_dup <- ihc_qlab_df %>% 
+  filter(SAMPLE_ID %in% sample_occur[sample_occur$Freq > 1, ]$Var1)
+ihc_qlab_df <- ihc_qlab_df %>% anti_join(ihc_qlab_df_dup)
+
+ihc_qlab_df_dup <- ihc_qlab_df_dup %>% filter(!is.na(PATNUM))
+ihc_qlab_df <- ihc_qlab_df %>% bind_rows(ihc_qlab_df_dup)
+
+# Add subject identifiers
+ihc_qlab_df <- ihc_qlab_df %>% left_join(subject_df)
+
+# Add lineage information
+ihc_qlab_df$PRACCSNM <- NA
+ihc_qlab_df$DERIVED_FROM <- ihc_qlab_df$SAMPLE_ID
+ihc_qlab_df$IS_PRIMARY <- "TRUE"
+
+ihc_qlab_df_final <- ihc_qlab_df[, output_sample_mapping_table_colnames]
+rm(ihc_qlab_df)
+
+# Example code for changing value manually
+ihc_qlab_df_final[ihc_qlab_df_final$SAMPLE_ID=="AF461895",]$BSED<-"2014-03-12"
+
+```
+
+#### Histogenex
+[...] sent slides and tissue blocks to Histogenex for DNA/RNA extraction. Histogenex then sent RNA to EA to perform RNAseq. When Histogenex extracted the RNA sample, each RNA sent to EA was assigned an RNA sample ID by concatenating a 5 letter-digit suffix to the HGX tissue ID. 
+```{r}
+
+# Common Histogenex (HIST) samples and their PFSPEC: The 9-digits HIST IDs are tissue IDs (e.g. 05511463C). The 14-digits HIST IDs are RNA, DNA or slide IDs (e.g. 05851623B0015R is RNA ID)
+hist_id_pattern_short <- "[0-9]{8}[A-Z]"
+hist_id_pattern_long <- paste0(hist_id_pattern_short, "[0-9]{4}[A-Z]")
+hist_id_pattern <- paste0(hist_id_pattern_short, "|", hist_id_pattern_long)
+
+```
+
+##### Rawdata
+Images
+```{r}
+
+# Extract sample IDs from names of images
+ihc_hist_image_ids <- list.files(path = file.path(hist_rawdata_path, "image"),
+                                 full.names = TRUE, recursive = TRUE) %>%
+  toupper() %>% str_extract(hist_id_pattern_long) %>% unique()
+
+length(ihc_hist_image_ids)
+
+```
+
+##### Sample Metadata
+
+```{r}
+
+# List all folders in histology folder.
+# Modify pattern as needed.
+ihc_hist_folders <- list.files(path= hist_rawdata_path, pattern = "hist_",
+                               full.names= TRUE, ignore.case = FALSE)
+
+# List all manifest files in ihc_image_folders.
+# Modify pattern as needed.
+ihc_hist_files <- list.files(path=ihc_hist_folders, pattern = ".csv",
+                             full.names = TRUE, ignore.case = FALSE)
+ihc_hist_files
+
+ihc_hist_df <- CombineCSVFiles(ihc_hist_files) %>% 
+  select(`STUDYID` = `Study Identifier`,
+         `BMFNAM` = `Vendor Name`,
+         `SCRNUM` = `Unique Subject Identifier`,
+         `VISIT` = `Visit Code`,
+         `BSED` = `Date of Specimen Collection`,
+         `BSETM` = `Time of Specimen Collection`,
+         `SAMPLE_ID` = `Vendor Unique Sample Identification`,
+         `PFSPEC` = `Specimen Type`,
+         `SPECCOND` = `Specimen Condition`) %>% 
+  mutate(BSED = format(as.Date(BSED, "%Y%m%d"), bsed_format),
+         PFSPEC = case_when(grepl("BLOCK SLIDE", PFSPEC, ignore.case = T) ~
+                              "BLOCK",
+                            TRUE ~ NA_character_))
+
+# Remove duplicate rows based on Sample_ID
+ihc_hist_df <- ihc_hist_df %>% distinct(SAMPLE_ID, .keep_all = TRUE) %>%
+  filter(!is.na(SAMPLE_ID))
+
+```
+
+Add lineage information from QLAB parental samples
+```{r}
+
+# [file name] of the file to be processed below for reference
+# Links QLAB, Histogenex sample identifiers and PATNUM/SCRNUM but some PATNUMs missing cause issues so just use SCRNUM
+qlab_hist_tracker_df <- read_xlsx(path = qlab_hist_tracker_filepath,
+                                  sheet = "Overview", col_types = "text",
+                                  na = "#N/A") %>% 
+  select(`HIST_ID` = `Sample #`,
+         `QLAB_ID` = `Sample Id`,
+         `SCRNUM` = `Screening ID`) %>%
+  left_join(subject_df) %>%
+  # Remove potentially duplicated entries based on HIST_ID
+  distinct(HIST_ID, .keep_all = TRUE)  
+
+# Example code to add raw manually to the data frame
+qlab_hist_tracker_df <- qlab_hist_tracker_df %>% add_row(QLAB_ID = "EB553863",
+                                                         SCRNUM = "26369901")
+
+## Build lineage
+
+## Add image identifiers
+ihc_hist_image_df <- data.frame(IMAGE_ID = ihc_hist_image_ids) %>% 
+  mutate(HIST_ID = str_extract(IMAGE_ID,hist_id_pattern_short)) %>%
+  drop_na(IMAGE_ID) %>% distinct()
+
+setdiff(ihc_hist_image_df$HIST_ID, ihc_hist_qlab_df$HIST_ID)
+ihc_hist_qlab_df <- ihc_hist_qlab_df %>% left_join(ihc_hist_image_df)
+
+## Format final dataframe
+
+## Image level section
+ihc_hist_df_images <- ihc_hist_qlab_df %>% 
+  mutate(PRACCSNM = HIST_ID,
+         SAMPLE_ID = IMAGE_ID,
+         DERIVED_FROM = QLAB_ID,
+         PFSPEC = "SECTION",
+         BMFNAM = "HIST",
+         IS_PRIMARY = "FALSE")
+
+ihc_hist_df_images <- 
+  ihc_hist_df_images[, sample_mapping_table_colnames] %>% distinct()
+
+## Block or slide level
+ihc_hist_df_sb <- ihc_hist_qlab_df %>% 
+  mutate(PRACCSNM = QLAB_ID,
+         SAMPLE_ID = HIST_ID,
+         DERIVED_FROM = QLAB_ID,
+         PFSPEC = case_when(grepl("[S]{1}$", HIST_ID) ~ "SECTION",
+                            grepl("[X]{1}$", HIST_ID) ~ "SLIDE",
+                            grepl("[B]{1}$", HIST_ID) ~ "BLOCK",
+                            grepl("[P]{1}$", HIST_ID) ~ "BLOOD",
+                            grepl("SLIDE CASE", HIST_ID, ignore.case = T) ~
+                              "SLIDE",
+                            TRUE ~ NA_character_),
+         BMFNAM="HIST",
+         IS_PRIMARY="FALSE")
+
+# Put all the columns in the order for output table
+ihc_hist_df_sb <- ihc_hist_df_sb[, output_sample_mapping_table_colnames] %>%
+  distinct()
+
+## Check we already have all QLAB parents
+setdiff(ihc_hist_qlab_df$QLAB_ID, ihc_qlab_df_final$SAMPLE_ID)
+
+## Compare metadata
+compare_tables(ihc_hist_qlab_df %>%
+                 select(SCRNUM, VISIT, BSED, BSETM, QLAB_ID, USUBJID, PATNUM) %>%
+                 distinct(),
+               ihc_qlab_df_final %>% select(lineage_inherited_colnames) %>%
+                 rename(`QLAB_ID` = `SAMPLE_ID`) %>% distinct(),
+               key = c("QLAB_ID"))
+
+## Combine all samples for IHC assay
+ihc_hist_df_final <- ihc_hist_df_images %>%
+  rbind(ihc_hist_df_sb) %>% drop_na(SAMPLE_ID)
+
+rm(ihc_hist_df)
+
+```
+
+
+### NGS
+
+#### DNAseq FDMI
+
+##### Rawdata
+Read the FMI "one-sample-per-line" raw data files.
+```{r dnaseq ngs, message=FALSE, warning=FALSE}
+
+# Function to extract character date and convert it to actual date
+extract_date <- function(x){
+  if(!is.na(x)){
+    return(case_when(
+      str_detect(x, "20\\d{6}") ~ 
+        as.Date(str_extract(x, "20\\d{6}"), format = "%Y%m%d"),
+      str_detect(x, "\\d{2}[A-z]{3}20\\d{2}") ~
+        as.Date(str_extract(x, "\\d{2}[A-z]{3}20\\d{2}"), format = "%d%b%Y")
+    )) 
+  }
+}
+
+# Make a vector of all the "one-sample-per-line" files.
+# Note: not subsetting using "std" since sometimes it is absent in filenames
+fmi_data_files <- ngs_rawdata_path %>% dir(full.names=T, recursive=T) %>% 
+  str_subset("one-sample-per-line") %>% str_subset("xlsx|XLSX")
+
+# Assign the key word and the date to each FMI "one-sample-per-line" file.
+# E.g. in file name
+# ngs_dna_targdna_foundationone_15-143_n154_one-sample-per-line_20160113.xlsx
+# the key word is 15-143.
+# Note: key word is unique to each FMI experiment.
+
+fmi_data_files_df <- data.frame(File_Path = fmi_data_files,
+                                stringsAsFactors = F) %>%
+  mutate(File_Name = basename(File_Path)) %>%
+  mutate(FMI_key_word = str_extract(File_Name, "\\d{2,}-\\d{2,}"),
+         # extract_date function is wrapped in suppressWarnings as 
+         # all the statements in the case_when function are evaluated every time,
+         # so it generates a warning every time when one of the
+         File_Date = suppressWarnings(extract_date(File_Name))) %>% 
+  group_by(FMI_key_word) %>% mutate(Latest_File_Date = max(File_Date))
+
+# Find the latest "one-sample-per-line" file version for a given FMI keyword
+fmi_data_files_2process_df <- fmi_data_files_df %>%
+  filter(File_Date == Latest_File_Date)
+
+print("These are the latest one-sample-per-line FMI manifests that will be processed:")
+print.data.frame(fmi_data_files_2process_df[, c("File_Name", "File_Date")])
+
+fmi_data_files_2process <- as.vector(fmi_data_files_2process_df$File_Path)
+
+# Function for stitching together data files in xlsx format
+# Column BAITSET is read to separate assays that use tissue samples
+# from those that use liquid samples (when applicable).
+CombineDataFiles <- function(file_list){
+  df <-  data.frame(stringsAsFactors=FALSE)
+  for(i in seq_along(file_list)){
+    tryCatch({xlsx_file <- read_xlsx(file_list[i], col_names = TRUE,
+                                     col_types = "text", na = "-")},
+             error=function(e) {cat("Bad file pattern:\n", file_list[i], "\n")}
+    )
+    # File that doesn't have the column "BAITSET" (older format):
+    if("BAITSET" %notin% colnames(xlsx_file)) {
+      j <- xlsx_file %>% select(`SAMPLE_ID` = `FMI SAMPLE ID`,
+                                `PATNUM` = `SUBJECT ID`,
+                                `PRACCSNM` = `SAMPLE ID`) %>%
+        mutate(BAITSET = NA_character_)
+      df <- bind_rows(df, j)
+      # File that has the column "BAITSET" (current format):
+    } else {
+      j <- xlsx_file %>% select(`SAMPLE_ID` = `FMI SAMPLE ID`,
+                                `PATNUM` = `SUBJECT ID`,
+                                `PRACCSNM` = `SAMPLE ID`,
+                                `BAITSET`)
+      df <- bind_rows(df, j)
+    }
+  }
+  return (df)
+}
+
+fmi_raw_df <- CombineDataFiles(fmi_data_files_2process) %>%
+  distinct(SAMPLE_ID, .keep_all = TRUE) %>%
+  filter(!is.na(SAMPLE_ID))
+
+```
+
+##### Sample Metadata
+Add the metadata inherited from parental HIST samples.
+```{r}
+
+# Check whether all the parental samples are present
+setdiff(fmi_raw_df$PRACCSNM, ihc_hist_df_final$SAMPLE_ID)
+
+# Add the metadata from parental HIST samples and apply output table format
+ngs_fdmi_df_final<-fmi_raw_df %>%
+  left_join(ihc_hist_df_final %>%
+              select(lineage_inherited_colnames) %>%
+              rename("PRACCSNM" = "SAMPLE_ID") %>% distinct()) %>%
+  mutate(PFSPEC = "DNA",
+         BMFNAM = "FDMI",
+         IS_PRIMARY = "FALSE") %>%
+  select(output_sample_mapping_table_colnames) %>% distinct()
+
+```
+
+#### RNAseq EA(Q2SO)
+EA has its own specific sequencing IDs in their LIMS. However, the EA IDs are not usually used by EA when transferring sequencing data to file share. RNA sample IDs are typically used instead. 
+
+**
+Note to curators:  
+* If Histogenex sent RNA sample to EA, typically 2 "layers" of samples need to be added to the output table:  
+1. "layer" of samples with IDs like 07290002C0017R with BMFNAM = HIST, PFSPEC = RNA to reflect that Histogenex extracted RNA (see section "Histogenex" of this Rmd for more information about typical Histogenex sample IDs),  
+2. "layer" of samples with the same IDs with BMFNAM = Q2SO, PFSPEC = RNA to reflect that Q2SO (EA) performed NGS on these RNA samples.  
+**
+
+##### Rawdata
+``` {r, rnaseq ngs, message=FALSE, warning=FALSE}
+
+# Check raw data files and compare with the manifest to see whether any samples are missing
+
+# List all NGS assay folders
+ngs_folders <- list.files(path= ngs_rawdata_path,
+                          pattern = "ngs_rna", full.names= TRUE,
+                          ignore.case = FALSE)
+
+# List all qc_summary files
+qc_summary_files <- list.files(path=ngs_folders, pattern = "qc_summary",
+                               full.names = TRUE, ignore.case = FALSE)
+
+# Function to combine all qc_summary files
+ea_combined <- function(file){
+  ea_df <- data.frame(EA_ID=character(), stringsAsFactors=FALSE)
+  for(i in file){
+    j = as.data.frame(read.delim(i, header = TRUE, sep = "\t", fill = TRUE, stringsAsFactors = FALSE)[2])
+    colnames(j) <- "SAMPLE_ID"
+    ea_df <- rbind(ea_df, j)
+  }
+  ea_df
+}
+
+ea_raw_df <- ea_combined(qc_summary_files) %>% distinct() %>%
+  mutate(HIST_ID = str_extract(SAMPLE_ID, hist_id_pattern_short))
+
+# Samples containing "UHRR" (Universal Human Reference RNA) in their names are controls that don't need to be mapped
+ea_raw_df[is.na(ea_raw_df$HIST_ID),]$SAMPLE_ID
+# Remove controls
+ea_raw_df <- ea_raw_df %>% drop_na(HIST_ID)
+```
+
+##### Sample Metadata
+Add the metadata inherited from parental HIST samples.
+```{r}
+
+## RNAseq assay -> PFSPEC = "RNA"
+ngs_ea_df <- ea_raw_df %>% 
+  mutate(BMFNAM = "Q2SO",
+         PFSPEC = "RNA",
+         IS_PRIMARY = "FALSE",
+         PRACCSNM = SAMPLE_ID)
+
+## Add lineage
+setdiff(ea_raw_df$HIST_ID, ihc_hist_df_final$SAMPLE_ID)
+# final df 
+
+# With Q2SO samples
+ngs_ea_df <- ngs_ea_df[!ngs_ea_df$HIST_ID %in% setdiff(ea_raw_df$HIST_ID,ihc_hist_df_final$SAMPLE_ID),] %>%
+  left_join(ihc_hist_df_final %>% select(lineage_inherited_colnames) %>%
+              rename(HIST_ID="SAMPLE_ID")) 
+
+# Add RNA by HIST
+ngs_ea_df_final<-ngs_ea_df %>% rbind(ngs_ea_df %>%
+                                       mutate(BMFNAM="HIST",PRACCSNM=HIST_ID)) %>%
+  select(output_sample_mapping_table_colnames) %>% distinct()
+
+rm(ea_raw_df)
+rm(ngs_ea_df)
+
+```
+
+##### NGS pipeline IDs
+NGS pipeline IDs are generated during NGS data analysis process. They are child samples of NGS samples and should be included in output table if their sample IDs are different from those of NGS samples.
+```{r ngs pipeline, results='hide', message=FALSE, warning=FALSE}
+
+pipeline_path <- file.path(ngs_outdata_path, "ngs_pipeline")
+pipeline_folders <- list.files(pipeline_path, pattern = "ea_obd",
+                               full.names = TRUE)
+pipeline_folders <- pipeline_folders %>% paste0("/configs")
+pipeline_files <- list.files(pipeline_folders, pattern = ".csv",
+                             full.names = TRUE)
+
+# Function to combine all pipeline files
+pipeline_combined <- function(file){
+  df <-  data.frame(Characters=character(), Characters=character(), stringsAsFactors=FALSE)
+  for(i in file){
+    j = as.data.frame(read_csv(file=i, col_types = cols(.default = col_character())))["SAMID"]%>%mutate(SAMID=toupper(SAMID))
+    colnames(j) <- "Pipeline_ID"
+    df <- rbind(df, j)
+  }
+  df
+}
+
+pipeline_df <- pipeline_combined(pipeline_files)
+pipeline_df <- pipeline_df %>% distinct()
+
+setdiff(pipeline_df$Pipeline_ID, ngs_ea_df_final$SAMPLE_ID)
+
+#add to final assay df
+#ngs_ea_df_final <- ngs_ea_df_final %>% rbind(
+#  ngs_ea_df_final %>%filter(BMFNAM=="Q2SO") %>% right_join(pipeline_df%>%rename(SAMPLE_ID=Pipeline_ID)) %>% mutate(BMFNAM="GNE")
+#)
+```
+
+# Merge output table
+```{r output table, results='hide', message=FALSE, warning=FALSE}
+
+output_table <- ihc_hist_df_final %>%
+  bind_rows(ihc_qlab_df_final) %>%
+  bind_rows(ngs_fdmi_df_final) %>%
+  bind_rows(ngs_ea_df_final)
+
+# Convert everything to upper case
+output_table <- mutate_all(output_table, .funs=toupper)
+
+output_table <- output_table %>%
+  distinct() %>%
+  arrange(SCRNUM)
+
+```
+
+# Samples from zb
+**
+Note to curators:  
+* Columns in zb file that can have sample ids: ZBGRPID, ZBREFID, ZBSMPLID. If there are sample IDs in these columns, check if those sample IDs are already in the output table.  
+* If a given sample ID is found in both zb file and output table, check if the values from other columns in zb (STUDYID, USUBJID, ZBNAM, ZBSPEC, VISIT, ZBDTC) match corresponding values in the output table. If not, try to find out from BOM which values (from zb or from output table) are correct.  
+* If a certain sample ID is missing from the output table, add it to the output table along with other information about this sample available (STUDYID, USUBJID, ZBNAM, ZBSPEC, VISIT, ZBDTC). Deduce PATNUM and SCRNUM values for this sample based on USUBJID if possible. Build sample lineage and assign values to PRACCSNM, DERIVED_FROM and IS_PRIMARY columns if possible. Assign NA to any columns for which you cannot find the values (like BSETM, BMFLOC).  
+**
+
+```{r}
+
+zb_add <- zb_file %>% 
+  select(`STUDYID`,
+         `USUBJID`,
+         `QLAB_ID` = `ZBREFID`,
+         `BMFNAM` = `ZBNAM`,
+         `PFSPEC` = `ZBSPEC`,
+         `SPECCOND` =`ZBSPCCND`,
+         `BMFLOC` =`ZBLOC`,
+         `VISIT`,
+         `HIST_ID`=`ZBSMPLID`) %>% distinct()
+
+setdiff(zb_add$QLAB_ID, output_table$SAMPLE_ID)
+setdiff(zb_add$HIST_ID, output_table$SAMPLE_ID)
+
+compare_tables(zb_add %>% rename(SAMPLE_ID = QLAB_ID),
+               output_table %>% filter(BMFNAM == "QLAB"),
+               key = c("SAMPLE_ID"))
+
+compare_tables(zb_add %>% rename(SAMPLE_ID = HIST_ID),
+               output_table %>% filter(BMFNAM == "HIST"),
+               key=c("SAMPLE_ID"))
+
+```
+
+
+# Harmonization
+
+## Subjects
+In the rawdata there were additional SCRNUM-PATNUM pairs. "Propagate" the found values.
+```{r}
+
+subj_dsi <- output_table %>% select(PATNUM, SCRNUM) %>% distinct() %>% drop_na(PATNUM)
+
+count(subj_dsi, SCRNUM) %>% filter(n > 1)
+count(subj_dsi, PATNUM) %>% filter(n > 1)
+
+#Example code to manually add SCRNUM
+subj_dsi[subj_dsi$PATNUM == "406103",]$SCRNUM <- "26688806"
+
+#save and use when rerun script
+#write.csv(subj_dsi %>% distinct(), scrnum_patnum_filepath, row.names = FALSE)
+```
+
+## Metadata
+
+```{r}
+
+# Use as needed
+
+# Harmonize BSED
+output_table$BSED <- ifelse(!is.na(output_table$BSED),
+                        format(strptime(output_table$BSED, "%Y%m%d"),
+                               format = "%Y-%m-%d"), NA)
+
+# Harmonize BSETM
+output_table$BSETM <- ifelse(!is.na(output_table$BSETM),
+                          format(strptime(output_table$BSETM, "%I:%M"),
+                                 format="%H:%M"), NA)
+# Change 00:00, 00:01, 23:59 to NA
+output_table$BSETM <- ifelse(output_table$BSETM %in% c("00:00","00:01","23:59"), NA,
+                          output_table$BSETM)
+
+
+# Harmonize BMFLOC
+output_table <- output_table %>%
+  mutate(BMFLOC = case_when(grepl("OTHER; SPECIFY BELOW:", BMFLOC) ~
+                              gsub("OTHER; SPECIFY BELOW:", "", BMFLOC),
+                            grepl("OTHER:", BMFLOC) ~
+                              gsub("OTHER:", "", BMFLOC),
+                            grepl("NOT SPECIFIED ON REPORT", BMFLOC) ~ NA,
+                            grepl("UNKNOWN EXACT LOCATION", BMFLOC) ~ NA,
+                            grepl("UNKNOWN", BMFLOC) ~ NA,
+                            grepl("UNK", BMFLOC) ~ NA,
+                            TRUE ~ BMFLOC))
+
+# Harmonize PFSPEC
+output_table <- output_table %>%
+  mutate(PFSPEC = case_when(grepl("[^BLOCK]SLIDE", BMFLOC) ~ "SLIDE",
+                            grepl("BLOCK", BMFLOC) ~ "BLOCK",
+                            # "WHOLE BLOOD" -> "BLOOD"
+                            grepl("BLOOD", PFSPEC) ~ "BLOOD",
+                            grepl("RNA", PFSPEC) ~ "RNA",
+                            grepl("DNA", PFSPEC) ~ "DNA",
+                            TRUE ~ PFSPEC))
+
+# Harmonize PFSPEC of Histogenex samples based on identifiers
+output_table <- output_table %>%
+  mutate(PFSPEC = case_when(BMFNAM == "HIST" & grepl("B$", SAMPLE_ID) ~ "BLOCK",
+                            BMFNAM == "HIST" & grepl("C$", SAMPLE_ID) ~ "SLIDE",
+                            BMFNAM == "HIST" & grepl("S$", SAMPLE_ID) ~ "SECTION",
+                            BMFNAM == "HIST" & grepl("R$", SAMPLE_ID) ~ "RNA"
+                            BMFNAM == "HIST" & grepl("D$", SAMPLE_ID) ~ "DNA"
+                            BMFNAM == "HIST" & grepl("P$", SAMPLE_ID) ~ "BLOOD"
+                            TRUE ~ PFSPEC))
+
+
+# Harmonize VISIT
+output_table <- output_table %>%
+  mutate(VISIT = case_when(grepl("^C[0-9]", VISIT) ~
+                             str_replace(VISIT, "^C", "CYCLE "),
+                           grepl("D[0-9]", VISIT) ~
+                             str_replace(VISIT, "D", " DAY "),
+                           grepl("UNSCH", VISIT) ~
+                             "UNSCHEDULED",
+                           grepl("SCRN", VISIT) ~ "SCREENING",
+                           grepl("FRESH BIOPSY", VISIT) ~ NA,
+                           TRUE ~ VISIT))
+
+# Remove *
+output_table <- output_table %>% 
+    mutate_all(funs(str_replace_all(., "\\*", "")))
+
+# Use tv file
+tv_file <- read_sas(tv_filepath)
+tv_VISIT <- unique(tv_file$VISIT) %>% toupper() %>% sort()
+# VISIT code that need to be harmonized
+setdiff(output_table$VISIT %>% unique(), tv_VISIT)
+
+# Replacement might have introduced empty string, replace empty string by NA
+output_table<-output_table %>% distinct() %>% 
+  mutate_all(list(~ na_if(., "")))
+
+output_table[output_table == "NA"] <- NA
+output_table[output_table == " "] <- NA
+
+```
+
+### PFSPEC, SPECCOND, SPECFRMT
+This section is for upcoming harmonization, not used yet.
+```{r, eval=FALSE}
+
+
+```
+
+### Final Formatting
+
+```{r QC issues and final format, message=FALSE, warning=FALSE}
+
+# Use as needed
+
+# Remove commas which causes issues for csv format
+output_table <- output_table %>% 
+    mutate_all(funs(str_replace_all(., ",", " ")))
+
+# Change all entries to upper case
+output_table <- mutate_all(output_table, .funs=toupper)
+
+# Trim all white space
+output_table <- mutate_all(output_table, list(~ trimws(.)))
+
+# Distinct, no NA sample id
+output_table <- distinct(output_table, .keep_all = TRUE) %>% 
+  mutate_all(~ ifelse(. %in% c("N/A", "null", ""), "NA", .)) %>% 
+  drop_na(SAMPLE_ID)
+
+output_table$STUDYID %>% unique()
+output_table$STUDYID <- study %>% toupper()
+
+```
+
+# Save the output table
+```{r}
+
+output_table <- output_table[, output_sample_mapping_table_colnames] %>% 
+  drop_na("SAMPLE_ID") %>%
+  distinct() %>% 
+  arrange(SCRNUM)
+
+write.csv(output_table, na = "NA", row.names = FALSE, 
+          file = output_table_path, quote = FALSE)
+
+```
+
+# R session info
+This document was created with the following R session parameters:
+```{r session info}
+
+session_info()
+
+```
